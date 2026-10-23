@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tubeproject-voice-input"
+version = "0.1.0"
+description = "TubeProject part 1: live microphone input to SenseVoice (AX650N) speech-to-text"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+tube-voice-input = "voice_input.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

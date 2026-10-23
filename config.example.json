@@ -1,0 +1,15 @@
+{
+  "device": "plughw:CARD=Array,DEV=0",
+  "channel": 0,
+  "silence": 0.8,
+  "threshold": 500,
+  "preroll": 0.2,
+  "min_utterance": 0.3,
+  "max_utterance": 30,
+  "queue_size": 4,
+  "queue_policy": "drop-newest",
+  "language": "en",
+  "chip": "ax650",
+  "sensevoice_python": "/path/to/venv312/bin/python",
+  "sensevoice_main": "/path/to/SenseVoice/python/main.py"
+}
