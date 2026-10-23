@@ -10,6 +10,10 @@
   "queue_policy": "drop-newest",
   "language": "en",
   "chip": "ax650",
+  "engine": "persistent",
+  "output": "text",
+  "startup_timeout": 120,
+  "timeout": 120,
   "sensevoice_python": "/path/to/venv312/bin/python",
   "sensevoice_main": "/path/to/SenseVoice/python/main.py"
 }
