@@ -73,6 +73,44 @@ protocol traffic on a private copy of stdout and sends library log noise to stde
 `--engine cli` keeps the old one-process-per-utterance behaviour as an explicit fallback; it reloads the model
 for every utterance and exists only for comparison/debugging.
 
+### Investigation: Whisper on the AX650N via AXCL (no backend added)
+
+Goal: a selectable `whisper-ax` backend that runs on the AX-M1 NPU (not OpenAI Whisper/PyTorch, whisper.cpp,
+faster-whisper, or any CPU/GPU/cloud substitute). **No such backend is implemented here** because the upstream
+evidence does not establish a path for a Debian 13 x86_64 host using AXCL. Nothing below was run on the owner's hardware.
+
+Upstream-documented (read from `AXERA-TECH/ax_asr_api`, `main`):
+
+- It lists Whisper-Tiny/Base/Small/Turbo and SenseVoice, and offers a C API (`AX_ASR_Init`, `AX_ASR_RunFile`,
+  `AX_ASR_RunPCM` with mono float32 in [-1, 1] plus sample rate), a pybind11 Python class `AX_ASR(model_type,
+  model_path)` with `transcribe_file` / `transcribe_pcm`, a CLI and an OpenAI-style `asr_server`.
+  `download_models.sh` takes Whisper models from the Hugging Face repo `AXERA-TECH/Whisper`
+  (`models-ax650/`); the models are not distributed with the library.
+
+Blockers:
+
+1. **Runtime mismatch.** `build_ax650.sh` cross-compiles with an aarch64 toolchain and links the on-board
+   `ax650n_bsp_sdk` static libraries (`libax_sys`, `libax_engine`, ...). That is the AX650N running its own Linux, not an
+   x86 host driving a PCIe card through AXCL. The only AXCL-linked target is `CHIP_AX8850` (`axcl_rt`, `axcl_comm`,
+   ...), again built for **aarch64** (`build_ax8850_aarch64.sh`) against `axcl_bsp_sdk`. There is no x86_64 / AX650N+AXCL target.
+2. **No x86_64 artifacts.** The wheel workflow builds only `linux/arm64` wheels (AX650, AX630C, AX8850); the README says
+   local (non-cross) builds are "暂不支持" (not yet supported). No x86_64 wheel or release asset was found.
+3. **Model/AXCL compatibility not shown.** Whether the `models-ax650` Whisper `.axmodel` files load through AXCL on an
+   AX-M1 is not documented (the Hugging Face repo could not be reached from the investigation sandbox).
+4. The existing SenseVoice setup works because the AXERA SenseVoice Python code uses `axengine` with
+   `AXCLRTExecutionProvider`; no equivalent AXERA Whisper Python/`axengine` implementation was found
+   (no `AXERA-TECH` Whisper repository on GitHub was found, only the `ax_asr_api` C++ project above).
+
+Evidence needed before a backend can be added (please run on the host and share the output):
+
+- The file listing of `AXERA-TECH/Whisper` (Hugging Face) and any Python/`axengine` Whisper script it contains.
+- Whether `axengine.InferenceSession(<whisper encoder>.axmodel)` loads with `AXCLRTExecutionProvider`, or
+  `axcl_run_model` accepts those files.
+- Any x86_64 build of `ax_asr_api` / `AX_ASR` against the installed AXCL, or confirmation that none exists.
+
+Until then SenseVoice remains the only backend. Accuracy work can continue with it (channel choice, language,
+RMS thresholds, hotwords, beam size).
+
 ### Verified environment (reported by the project owner)
 
 - Debian 13 x86_64, two Radxa AX-M1 (AX650N) cards, both working with `axcl-smi` and `axcl_run_model`.
