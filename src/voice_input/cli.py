@@ -8,11 +8,12 @@ import time
 
 from .audio import extract_channel, rms
 from .capture import Capture
-from .config import ENGINES, LANGUAGES, OUTPUTS, Settings, load_config
+from .config import (ENGINES, LANGUAGES, OUTPUTS, WHISPER_DEVICES, WHISPER_MODELS, WHISPER_TASKS,
+                     Settings, load_config)
 from .jobqueue import POLICIES, BoundedJobQueue, Worker
 from .output import Utterance, format_record, transcript_record
 from .segmenter import Segmenter, duration_seconds
-from .transcriber import SenseVoiceCliTranscriber, SenseVoiceSession, TranscriptionError
+from .transcriber import SenseVoiceCliTranscriber, SenseVoiceSession, TranscriptionError, WhisperSession
 
 BLOCK_MS = 20
 
@@ -32,7 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-utterance", type=float, help=f"force-split utterances at N seconds ({d.max_utterance})")
     p.add_argument("--queue-size", type=int, help=f"max utterances waiting for transcription ({d.queue_size})")
     p.add_argument("--queue-policy", choices=POLICIES, help=f"when full, drop this utterance ({d.queue_policy})")
-    p.add_argument("--language", choices=LANGUAGES, help=f"SenseVoice language ({d.language})")
+    p.add_argument("--language", help=f"language: {', '.join(LANGUAGES)} for SenseVoice; for --engine whisper "
+                                      f"also any Whisper code via --whisper-language ({d.language})")
     p.add_argument("--chip", help=f"SenseVoice --chip value ({d.chip})")
     p.add_argument("--sensevoice-main", help="path to SenseVoice python/main.py")
     p.add_argument("--sensevoice-python", help="Python interpreter for SenseVoice (default: this one)")
@@ -40,8 +42,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="directory with sensevoice.axmodel, am.mvn, tokens.txt, *.bpe.model "
                         "(default: <main.py dir>/models/SenseVoice/sensevoice_<chip>)")
     p.add_argument("--engine", choices=ENGINES,
-                   help=f"persistent = model loaded once in a long-lived worker; cli = legacy "
-                        f"one-process-per-utterance fallback ({d.engine})")
+                   help=f"persistent = SenseVoice loaded once in a long-lived worker; cli = legacy "
+                        f"one-process-per-utterance SenseVoice fallback; whisper = offline OpenAI Whisper "
+                        f"on PyTorch (CPU), loaded once ({d.engine})")
+    p.add_argument("--whisper-python", help="Python interpreter of the Whisper venv (default: this one)")
+    p.add_argument("--whisper-model", help=f"Whisper model: {', '.join(WHISPER_MODELS)} or a checkpoint path "
+                                           "(default: base.en for English, else base)")
+    p.add_argument("--whisper-language", help="Whisper language code (e.g. en, de) or auto; default: --language")
+    p.add_argument("--whisper-task", choices=WHISPER_TASKS, help=f"transcribe, or translate to English ({d.whisper_task})")
+    p.add_argument("--whisper-device", choices=WHISPER_DEVICES, help=f"PyTorch device ({d.whisper_device})")
+    p.add_argument("--whisper-download-root", help="model cache directory (default: ~/.cache/whisper)")
     p.add_argument("--output", choices=OUTPUTS,
                    help=f"text = 'ASR result: ...' lines; jsonl = one JSON object per transcript ({d.output})")
     p.add_argument("--startup-timeout", type=float, help=f"seconds to wait for the model to load ({d.startup_timeout})")
@@ -60,6 +70,13 @@ def resolve_settings(args) -> Settings:
     return s
 
 
+def make_whisper_transcriber(s: Settings) -> WhisperSession:
+    python = os.path.expanduser(s.whisper_python) if s.whisper_python else sys.executable
+    root = os.path.expanduser(s.whisper_download_root)
+    return WhisperSession(python, s.effective_whisper_model(), s.effective_whisper_language(),
+                          s.whisper_task, s.whisper_device, root, s.timeout, s.startup_timeout)
+
+
 def make_transcriber(s: Settings, python: str, main_py: Path):
     if s.engine == "cli":
         return SenseVoiceCliTranscriber(python, main_py, s.chip, s.language, s.timeout)
@@ -76,6 +93,11 @@ def run(s: Settings, transcriber=None, capture=None, out=None, err=None) -> int:
     def say(msg, stream=info):
         print(msg, file=stream, flush=True)
 
+    label = "SenseVoice"
+    if transcriber is None and s.engine == "whisper":
+        transcriber = make_whisper_transcriber(s)
+    if s.engine == "whisper":
+        label = "Whisper"
     if transcriber is None:
         main_py = Path(s.sensevoice_main).expanduser().resolve()
         if not main_py.is_file():
@@ -85,7 +107,11 @@ def run(s: Settings, transcriber=None, capture=None, out=None, err=None) -> int:
         transcriber = make_transcriber(s, python, main_py)
 
     if hasattr(transcriber, "start"):
-        say(f"Loading SenseVoice ({s.chip}, language {s.language})...")
+        if label == "Whisper":
+            say(f"Loading Whisper model {s.effective_whisper_model()} on {s.whisper_device} "
+                f"(first use downloads weights to the Whisper cache)...")
+        else:
+            say(f"Loading SenseVoice ({s.chip}, language {s.language})...")
         try:
             transcriber.start()
         except TranscriptionError as exc:
@@ -96,7 +122,7 @@ def run(s: Settings, transcriber=None, capture=None, out=None, err=None) -> int:
             transcriber.shutdown()
             say("\nInterrupted during startup.", err)
             return 130
-        say("SenseVoice ready.")
+        say(f"{label} ready.")
 
     def handle(utt):
         try:
@@ -106,7 +132,8 @@ def run(s: Settings, transcriber=None, capture=None, out=None, err=None) -> int:
             return
         if not res.text:
             return
-        record = transcript_record(utt, res.text, s.language, duration_seconds(utt.pcm),
+        language = s.effective_whisper_language() if s.engine == "whisper" else s.language
+        record = transcript_record(utt, res.text, language, duration_seconds(utt.pcm),
                                    res.inference_seconds, time.time())
         say(format_record(record, s.output), out)
 

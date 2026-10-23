@@ -82,7 +82,8 @@ def serve(engine, stdin, out) -> int:
             if len(pcm) < 2:
                 raise ValueError("empty audio")
             language = req.get("language", "auto")
-            if language not in engine.languages:
+            languages = getattr(engine, "languages", None)
+            if languages is not None and language not in languages:
                 raise ValueError(f"unsupported language {language!r}")
             start = time.monotonic()
             text = engine.transcribe(pcm[: len(pcm) - len(pcm) % 2], language)

@@ -9,6 +9,9 @@ description = "TubeProject part 1: live microphone input to SenseVoice (AX650N) 
 requires-python = ">=3.10"
 dependencies = []
 
+[project.optional-dependencies]
+whisper = ["openai-whisper"]  # optional; install in a separate venv, see README
+
 [project.scripts]
 tube-voice-input = "voice_input.cli:main"
 

@@ -107,6 +107,8 @@ class SenseVoiceSession:
     call. transcribe() is serialised, so utterances are processed strictly in order.
     """
 
+    label = "SenseVoice"
+
     def __init__(self, python: str, sensevoice_dir: Path, chip: str = "ax650", language: str = "en",
                  timeout: float = 120.0, startup_timeout: float = 120.0, model_dir: str = "",
                  worker_script: Path = WORKER_SCRIPT, extra_args: Optional[List[str]] = None):
@@ -169,7 +171,7 @@ class SenseVoiceSession:
             raise
         if msg["event"] != "ready":
             self._discard()
-            raise TranscriptionError(f"SenseVoice failed to start: {msg.get('error', msg)}")
+            raise TranscriptionError(f"{self.label} failed to start: {msg.get('error', msg)}")
 
     @staticmethod
     def _read(proc, lines) -> None:
@@ -188,13 +190,13 @@ class SenseVoiceSession:
             try:
                 line = lines.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
-                raise TranscriptionError(f"SenseVoice {what} timed out after {timeout}s") from None
+                raise TranscriptionError(f"{self.label} {what} timed out after {timeout}s") from None
             if line is None:
                 lines.put(None)
                 code = proc.poll() if proc else None
                 if self._closed:
                     raise TranscriptionError("transcriber is shut down")
-                raise TranscriptionError(f"SenseVoice worker exited unexpectedly (code {code}) during {what}")
+                raise TranscriptionError(f"{self.label} worker exited unexpectedly (code {code}) during {what}")
             try:
                 msg = json.loads(line)
             except ValueError:
@@ -221,12 +223,12 @@ class SenseVoiceSession:
                 msg = self._await(lambda m: m.get("id") == req_id, self.timeout, "inference")
             except (OSError, ValueError) as exc:
                 self._discard()
-                raise TranscriptionError(f"SenseVoice worker pipe failed: {exc}") from exc
+                raise TranscriptionError(f"{self.label} worker pipe failed: {exc}") from exc
             except TranscriptionError:
                 self._discard()  # hung or dead worker: kill it; the next utterance restarts it
                 raise
             if not msg.get("ok"):
-                raise TranscriptionError(f"SenseVoice inference failed: {msg.get('error')}")
+                raise TranscriptionError(f"{self.label} inference failed: {msg.get('error')}")
             return Transcription(msg.get("text", ""), msg.get("inference_seconds"),
                                  time.monotonic() - began)
 
@@ -272,3 +274,28 @@ class SenseVoiceSession:
             lines = self._lines
         lines.put(None)  # unblock a transcribe() currently waiting
         self._reap(proc, reader, grace=2.0)
+
+
+WHISPER_WORKER_SCRIPT = Path(__file__).with_name("whisper_worker.py")
+
+
+class WhisperSession(SenseVoiceSession):
+    """Same persistent-worker protocol, backed by whisper_worker.py (official OpenAI Whisper, PyTorch)."""
+
+    label = "Whisper"
+
+    def __init__(self, python: str, model: str, language: str = "en", task: str = "transcribe",
+                 device: str = "cpu", download_root: str = "", timeout: float = 120.0,
+                 startup_timeout: float = 120.0, worker_script: Path = WHISPER_WORKER_SCRIPT,
+                 extra_args: Optional[List[str]] = None):
+        super().__init__(python, Path.cwd(), language=language, timeout=timeout,
+                         startup_timeout=startup_timeout, worker_script=worker_script,
+                         extra_args=extra_args)
+        self.model, self.task, self.device, self.download_root = model, task, device, download_root
+
+    def command(self) -> List[str]:
+        cmd = [self.python, str(self.worker_script), "--model", self.model,
+               "--task", self.task, "--device", self.device]
+        if self.download_root:
+            cmd += ["--download-root", self.download_root]
+        return cmd + self.extra_args

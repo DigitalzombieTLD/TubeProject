@@ -73,6 +73,87 @@ protocol traffic on a private copy of stdout and sends library log noise to stde
 `--engine cli` keeps the old one-process-per-utterance behaviour as an explicit fallback; it reloads the model
 for every utterance and exists only for comparison/debugging.
 
+### Alternative back end: offline OpenAI Whisper (CPU)
+
+`--engine whisper` runs the **official [openai/whisper](https://github.com/openai/whisper) package locally on
+PyTorch** for comparison with SenseVoice. It is offline inference (no OpenAI API, no API key) and it does
+**not** use the AX650N cards or the AMD iGPU: this is the plain PyTorch CPU path. AMD GPU acceleration is
+not implemented or verified. SenseVoice (`persistent`/`cli`) is unchanged and remains the default.
+
+It reuses the same capture, channel selection, RMS segmentation, bounded queue and output code. A persistent
+worker (`whisper_worker.py`, same JSON Lines protocol and crash/timeout recovery as the SenseVoice worker)
+calls `whisper.load_model()` once at startup and then transcribes every utterance with that loaded model. The
+captured mono 16 kHz PCM is only converted from int16 to float32 and passed to `model.transcribe()` as an
+array; no files are written and `ffmpeg` is not invoked for it. `ffmpeg` is still an upstream prerequisite,
+so install it as the Whisper README says. The worker runs with its own interpreter, so Whisper's dependencies
+stay out of the SenseVoice environment and out of this project's (standard-library only) core.
+
+**Install on Debian 13 x86_64 (separate venv; run these yourself, nothing here calls apt/sudo):**
+
+```bash
+sudo apt install ffmpeg python3-venv        # ffmpeg is required by upstream Whisper
+python3 -m venv ~/whisper-venv              # NOT ~/ax-audio/.venv312; keep AXCL/SenseVoice untouched
+. ~/whisper-venv/bin/activate
+pip install -U pip
+# CPU-only PyTorch (avoids the multi-GB CUDA wheels that the default PyPI torch pulls in on x86_64 Linux):
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -U openai-whisper               # or, from this clone: pip install -e '.[whisper]'
+python -c "import whisper; print(whisper.available_models())"
+```
+
+Python 3.12 note: the `openai-whisper` 20250625 release on PyPI lists Python 3.8-3.13 in its metadata, and
+Debian 13's default Python is 3.13. No versions are pinned here; if `pip` fails building `tiktoken`/`numba`,
+see the upstream "Setup" notes (a Rust toolchain may be needed when no wheel exists) and
+[PyTorch's install selector](https://pytorch.org/get-started/locally/). Upstream setup docs:
+<https://github.com/openai/whisper#setup>.
+
+**Model download and cache:** nothing is downloaded at install time or by the default SenseVoice engine.
+With `--engine whisper`, the worker's startup calls `whisper.load_model()`, which downloads the weights the
+first time that model is used (the app prints `Loading Whisper model ... first use downloads weights`
+before this) and stores them in `~/.cache/whisper` (or `$XDG_CACHE_HOME/whisper`; override with
+`--whisper-download-root`). Later starts load from the cache. To pre-download explicitly:
+`python -c "import whisper; whisper.load_model('base.en')"`. Increase `--startup-timeout` for the first run
+(default 120 s) if your connection or CPU is slow.
+
+**Run** (same XVF3800 capture; the app itself can run from any Python, only `--whisper-python` matters):
+
+```bash
+PYTHONPATH=src ~/whisper-venv/bin/python -m voice_input --engine whisper \
+  --whisper-python ~/whisper-venv/bin/python --channel 0 --language en            # base.en
+PYTHONPATH=src ~/whisper-venv/bin/python -m voice_input --engine whisper \
+  --whisper-python ~/whisper-venv/bin/python --whisper-model small.en --channel 1 --output jsonl
+PYTHONPATH=src ~/whisper-venv/bin/python -m voice_input --engine whisper \
+  --whisper-python ~/whisper-venv/bin/python --whisper-model small --whisper-language de
+```
+
+`--sensevoice-main` is not needed. Models: English (`*.en`) models are the default when the language is
+English and are only accepted with English/`auto`; pick a multilingual model (`base`, `small`, ...) for other
+languages, auto-detection or `--whisper-task translate`. Upstream's model table lists approximate VRAM and
+relative speed (`tiny`/`base` ~1 GB and fastest, `small` ~2 GB, `medium` ~5 GB, `large` ~10 GB and slowest) and
+says `.en` models tend to do better for English, especially `tiny.en` and `base.en`. Start with `base.en`
+(speed) and `small.en` (quality); larger models on CPU are likely too slow for continuous use. Those are
+upstream's general figures, **not measurements on this host**: speed relative to real time and recognition
+accuracy on the XVF3800 still need testing by the owner. Whisper (here with `condition_on_previous_text=False`)
+may emit text for non-speech noise or repeat itself on very short clips; compare `inference_seconds` and
+`latency_seconds` in `--output jsonl`.
+
+**A/B test recipe (same utterances, same channel):**
+
+1. Write 5-10 test sentences down (the expected text) and decide the channel (`--channel 0`).
+2. Speak them in the same order, with the same pauses and distance, once per back end, each with
+   `--output jsonl`, e.g. `... --engine whisper --whisper-model base.en --channel 0 --output jsonl > whisper-base.jsonl`
+   and `... (SenseVoice command above) --channel 0 --output jsonl > sensevoice.jsonl` (repeat for `small.en`).
+   Stop with Ctrl-C after the last sentence has been printed.
+3. Compare `text` against the expected text per `seq` (a gap in `seq` means an utterance was dropped), and
+   compare the median of `inference_seconds` against `audio_seconds`, and `latency_seconds`.
+   Keep the recordings of the same conditions; do not draw conclusions from one run.
+
+Whisper troubleshooting: `error: Whisper failed to start: ModuleNotFoundError: ... whisper/torch/numpy`: the
+interpreter given by `--whisper-python` is not the Whisper venv. `FileNotFoundError: ffmpeg`: install host
+`ffmpeg`. `Whisper failed to start: ... URLError`/download errors: no network on first use; pre-download
+the model or place it in the cache. `Whisper startup timed out`: raise `--startup-timeout` (first download or slow
+disk). `English-only model ... cannot be used with language`: choose a multilingual model.
+
 ### Verified environment (reported by the project owner)
 
 - Debian 13 x86_64, two Radxa AX-M1 (AX650N) cards, both working with `axcl-smi` and `axcl_run_model`.
@@ -151,7 +232,13 @@ Or copy `config.example.json`, edit the paths, and run `python -m voice_input --
 | `--sensevoice-main` | *(required)* | Path to SenseVoice `python/main.py` |
 | `--sensevoice-python` | current interpreter | Interpreter used for SenseVoice |
 | `--sensevoice-model-dir` | `<main.py dir>/models/SenseVoice/sensevoice_<chip>` | Directory with `sensevoice.axmodel`, `am.mvn`, `tokens.txt`, `chn_jpn_yue_eng_ko_spectok.bpe.model` |
-| `--engine` | `persistent` | `persistent` worker, or `cli` fallback (model reload per utterance) |
+| `--engine` | `persistent` | `persistent` SenseVoice worker, `cli` fallback (model reload per utterance), or `whisper` (see below) |
+| `--whisper-python` | current interpreter | Interpreter of the Whisper venv (`--engine whisper`) |
+| `--whisper-model` | `base.en` if language is `en`, else `base` | `tiny`, `base`, `small`, `medium`, `large`, `turbo` (+ `.en` variants for tiny/base/small/medium) or a checkpoint path |
+| `--whisper-language` | value of `--language` | Whisper language code (`en`, `de`, ...) or `auto` for detection |
+| `--whisper-task` | `transcribe` | `transcribe`, or `translate` (to English; multilingual models only) |
+| `--whisper-device` | `cpu` | PyTorch device; `cpu` is the documented path here |
+| `--whisper-download-root` | `~/.cache/whisper` | Model cache directory |
 | `--output` | `text` | `text` or `jsonl` (see Output format) |
 | `--startup-timeout` | `120` | Seconds to wait for the model to load |
 | `--timeout` | `120` | Per-utterance inference timeout (s); on expiry the worker is restarted |
@@ -217,6 +304,8 @@ PYTHONPATH=src python -m unittest discover -s tests     # or: pytest
 
 ### Limitations
 
+- The Whisper back end is covered by unit tests with fake Whisper modules only; it has not been run with real
+  Whisper/PyTorch weights on the owner's host.
 - Prototype; non-streaming, whole-utterance inference (no partial text while speaking). Text appears after the
   silence pause plus inference.
 - Energy-threshold segmentation only (no VAD), so noisy rooms need tuning.
