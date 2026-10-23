@@ -5,7 +5,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from voice_input.transcriber import (SenseVoiceTranscriber, TranscriptionError,
+from voice_input.transcriber import (SenseVoiceCliTranscriber, TranscriptionError,
                                      build_command, parse_result)
 
 PCM = array("h", [100] * 1600).tobytes()
@@ -29,12 +29,12 @@ class TranscriberTests(unittest.TestCase):
 
     def test_success_and_failure(self):
         ok = self._fake("import sys\nassert sys.argv[1]=='-i'\nprint('ASR result: hello')")
-        self.assertEqual(SenseVoiceTranscriber(sys.executable, ok).transcribe(PCM), "hello")
+        self.assertEqual(SenseVoiceCliTranscriber(sys.executable, ok).transcribe(PCM).text, "hello")
         bad = self._fake("import sys\nprint('bad')\nsys.exit(3)")
         with self.assertRaisesRegex(TranscriptionError, "exited with 3"):
-            SenseVoiceTranscriber(sys.executable, bad).transcribe(PCM)
+            SenseVoiceCliTranscriber(sys.executable, bad).transcribe(PCM)
 
     def test_timeout(self):
         slow = self._fake("import time\ntime.sleep(30)")
         with self.assertRaisesRegex(TranscriptionError, "timed out"):
-            SenseVoiceTranscriber(sys.executable, slow, timeout=0.5).transcribe(PCM)
+            SenseVoiceCliTranscriber(sys.executable, slow, timeout=0.5).transcribe(PCM)
